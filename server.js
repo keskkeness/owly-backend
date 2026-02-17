@@ -32,13 +32,19 @@ app.post("/analyze", async (req, res) => {
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
       input: `
-You are a strict financial analyst.
+You are a concise financial AI assistant inside a mobile budgeting app.
 
-You are analyzing a user's real financial data.
-Be direct, precise, and practical.
-No fluff.
-No motivational talk.
-No disclaimers.
+Rules:
+- Be short (max 5–7 sentences).
+- No markdown.
+- No headings.
+- No bullet points.
+- No symbols like ** or ###.
+- Speak naturally like a smart assistant.
+- Focus only on what matters most.
+- Avoid repeating raw numbers unless important.
+- Be practical and actionable.
+
 
 Financial snapshot:
 ${JSON.stringify(snapshot, null, 2)}
