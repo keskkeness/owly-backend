@@ -9,17 +9,24 @@ const app = express();
 app.use(express.json());
 
 /* ------------------------------------------
-   FIREBASE ADMIN INIT
+   FIREBASE ADMIN INIT (BASE64 VERSION)
 ------------------------------------------- */
 
-// Render environment variable:
-// FIREBASE_SERVICE_ACCOUNT = full JSON string
+const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT;
 
-if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-  throw new Error("Missing FIREBASE_SERVICE_ACCOUNT env variable");
+if (!serviceAccountBase64) {
+  throw new Error("FIREBASE_SERVICE_ACCOUNT is not set");
 }
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+let serviceAccount;
+
+try {
+  serviceAccount = JSON.parse(
+    Buffer.from(serviceAccountBase64, "base64").toString("utf8")
+  );
+} catch (err) {
+  throw new Error("Failed to parse FIREBASE_SERVICE_ACCOUNT");
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -28,6 +35,10 @@ admin.initializeApp({
 /* ------------------------------------------
    OPENAI INIT
 ------------------------------------------- */
+
+if (!process.env.OPENAI_API_KEY) {
+  throw new Error("Missing OPENAI_API_KEY");
+}
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -98,11 +109,14 @@ app.post("/analyze", verifyFirebaseToken, async (req, res) => {
     const { snapshot, question } = req.body;
 
     if (typeof question !== "string" || question.trim() === "") {
-      return res.status(400).json({ error: "Question must be a non-empty string." });
+      return res.status(400).json({
+        error: "Question must be a non-empty string."
+      });
     }
 
     const cleanQuestion = question.trim();
 
+    // Small talk response (no AI call needed)
     if (isSmallTalk(cleanQuestion)) {
       return res.json({
         result:
@@ -113,7 +127,7 @@ app.post("/analyze", verifyFirebaseToken, async (req, res) => {
     if (!snapshot || typeof snapshot !== "object") {
       return res.json({
         result:
-          "I don’t have your financial data yet. Try adding some transactions and ask me again."
+          "I don’t have enough financial data yet. Try adding some transactions and ask me again."
       });
     }
 
@@ -121,18 +135,21 @@ app.post("/analyze", verifyFirebaseToken, async (req, res) => {
 You are Owly, a friendly AI inside a mobile budgeting app.
 
 Personality:
-- Warm, calm, supportive
+- Warm
+- Calm
+- Supportive
+- Human
 - Not robotic
-- Not formal financial analyst tone
+- Not a strict financial analyst
 
 Rules:
-- Keep responses short (max 5-6 sentences)
+- Keep responses short (max 5 sentences)
 - No markdown
 - No bullet points
 - No symbols like ** or ###
-- Return a single clean paragraph
-- Do not overanalyze
+- One clean paragraph
 - Be practical
+- Only focus on what matters most
 
 Financial Snapshot:
 ${JSON.stringify(snapshot)}
@@ -145,9 +162,9 @@ Respond naturally as Owly.
 
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
-      max_output_tokens: 220,
       temperature: 0.4,
-      input: prompt,
+      max_output_tokens: 200,
+      input: prompt
     });
 
     const output =
@@ -158,8 +175,9 @@ Respond naturally as Owly.
 
   } catch (error) {
     console.error("AI ERROR:", error);
+
     res.status(500).json({
-      error: "Owly ran into an issue. Please try again.",
+      error: "Owly ran into an issue. Please try again."
     });
   }
 });
