@@ -9,24 +9,17 @@ const app = express();
 app.use(express.json());
 
 /* ------------------------------------------
-   FIREBASE ADMIN INIT (BASE64 VERSION)
+   FIREBASE ADMIN INIT (BASE64)
 ------------------------------------------- */
 
 const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT;
-
 if (!serviceAccountBase64) {
   throw new Error("FIREBASE_SERVICE_ACCOUNT is not set");
 }
 
-let serviceAccount;
-
-try {
-  serviceAccount = JSON.parse(
-    Buffer.from(serviceAccountBase64, "base64").toString("utf8")
-  );
-} catch (err) {
-  throw new Error("Failed to parse FIREBASE_SERVICE_ACCOUNT");
-}
+const serviceAccount = JSON.parse(
+  Buffer.from(serviceAccountBase64, "base64").toString("utf8")
+);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -45,36 +38,43 @@ const openai = new OpenAI({
 });
 
 /* ------------------------------------------
-   HEALTH CHECK
+   SIMPLE USER RATE LIMIT (IN MEMORY)
 ------------------------------------------- */
 
-app.get("/", (req, res) => {
-  res.send("Owly backend running.");
-});
+const userRequestLog = new Map();
+// structure:
+// userRequestLog.set(uid, { count, firstRequestTimestamp })
 
-/* ------------------------------------------
-   SMALL TALK DETECTION
-------------------------------------------- */
+const MAX_REQUESTS_PER_MINUTE = 8;
 
-function isSmallTalk(text) {
-  if (!text) return false;
+function checkRateLimit(uid) {
+  const now = Date.now();
 
-  const normalized = text.toLowerCase().trim();
+  if (!userRequestLog.has(uid)) {
+    userRequestLog.set(uid, {
+      count: 1,
+      firstRequestTimestamp: now,
+    });
+    return true;
+  }
 
-  const greetings = [
-    "hi",
-    "hello",
-    "hey",
-    "how are you",
-    "what's up",
-    "whats up",
-    "good morning",
-    "good evening",
-    "selam",
-    "naber"
-  ];
+  const data = userRequestLog.get(uid);
 
-  return greetings.some(g => normalized.includes(g));
+  if (now - data.firstRequestTimestamp > 60_000) {
+    // reset window
+    userRequestLog.set(uid, {
+      count: 1,
+      firstRequestTimestamp: now,
+    });
+    return true;
+  }
+
+  if (data.count >= MAX_REQUESTS_PER_MINUTE) {
+    return false;
+  }
+
+  data.count += 1;
+  return true;
 }
 
 /* ------------------------------------------
@@ -95,10 +95,17 @@ async function verifyFirebaseToken(req, res, next) {
     req.user = decoded;
     next();
   } catch (error) {
-    console.error("Invalid Firebase token:", error);
     return res.status(401).json({ error: "Invalid token" });
   }
 }
+
+/* ------------------------------------------
+   HEALTH CHECK
+------------------------------------------- */
+
+app.get("/", (req, res) => {
+  res.send("Owly backend running.");
+});
 
 /* ------------------------------------------
    ANALYZE ENDPOINT
@@ -106,6 +113,15 @@ async function verifyFirebaseToken(req, res, next) {
 
 app.post("/analyze", verifyFirebaseToken, async (req, res) => {
   try {
+    const uid = req.user.uid;
+
+    // RATE LIMIT CHECK
+    if (!checkRateLimit(uid)) {
+      return res.status(429).json({
+        error: "Too many requests. Please slow down."
+      });
+    }
+
     const { snapshot, question } = req.body;
 
     if (typeof question !== "string" || question.trim() === "") {
@@ -116,66 +132,76 @@ app.post("/analyze", verifyFirebaseToken, async (req, res) => {
 
     const cleanQuestion = question.trim();
 
-    // Small talk response (no AI call needed)
-    if (isSmallTalk(cleanQuestion)) {
-      return res.json({
-        result:
-          "Hey, I’m Owly. I’m doing great and keeping an eye on your spending. How can I help you today?"
-      });
-    }
+    const systemPrompt = `
+You are Owly, a smart but emotionally intelligent AI inside a mobile budgeting app.
 
-    if (!snapshot || typeof snapshot !== "object") {
-      return res.json({
-        result:
-          "I don’t have enough financial data yet. Try adding some transactions and ask me again."
-      });
-    }
-
-    const prompt = `
-You are Owly, a friendly AI inside a mobile budgeting app.
-
-Personality:
-- Warm
+Your personality:
+- Friendly
 - Calm
+- Grounded
 - Supportive
-- Human
-- Not robotic
-- Not a strict financial analyst
+- Never robotic
+- Never overly formal
+- Never preachy
 
-Rules:
-- Keep responses short (max 5 sentences)
-- No markdown
-- No bullet points
-- No symbols like ** or ###
-- One clean paragraph
-- Be practical
-- Only focus on what matters most
+You can handle:
+- Greetings
+- Casual chat
+- Emotional frustration
+- Swearing
+- Confusion
+- Financial analysis questions
 
+Behavior rules:
+
+1) If user greets → respond briefly and warmly.
+2) If user is emotional or frustrated → acknowledge emotion first, then guide calmly.
+3) If user swears → do not react aggressively. Stay calm and human.
+4) If user asks financial question → analyze snapshot carefully and give practical advice.
+5) If snapshot is empty → encourage adding transactions gently.
+6) Never repeat the same greeting response repeatedly.
+7) Keep responses short (max 5 sentences).
+8) No markdown.
+9) No bullet points.
+10) No special formatting symbols.
+11) One clean paragraph only.
+12) Focus only on what matters most.
+
+Be natural. Sound like a smart friend who understands money and people.
+`;
+
+    const userPrompt = `
 Financial Snapshot:
 ${JSON.stringify(snapshot)}
 
-User Question:
+User Message:
 ${cleanQuestion}
-
-Respond naturally as Owly.
 `;
 
     const response = await openai.responses.create({
       model: "gpt-4o-mini",
-      temperature: 0.4,
-      max_output_tokens: 200,
-      input: prompt
+      temperature: 0.5,
+      max_output_tokens: 220,
+      input: [
+        {
+          role: "system",
+          content: systemPrompt
+        },
+        {
+          role: "user",
+          content: userPrompt
+        }
+      ]
     });
 
     const output =
       response.output_text?.trim() ||
-      "Hmm, I couldn’t think of something useful right now. Try asking differently.";
+      "I’m not sure how to respond right now. Try asking differently.";
 
     res.json({ result: output });
 
   } catch (error) {
     console.error("AI ERROR:", error);
-
     res.status(500).json({
       error: "Owly ran into an issue. Please try again."
     });
